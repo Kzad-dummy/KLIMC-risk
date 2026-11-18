@@ -1,8 +1,14 @@
 import { IoManager } from "./managers/IoManager";
-import { AllowedSubmissions, Problem, User } from "./types/types";
+import { Problem, PublicProblem, Stakes, User } from "./types/types";
+import { CONFIG, riskLimits, settleQuestion, totalScore, validateRisk } from "./scoring";
 
-const PROBLEM_TIME_S = 20;
+const RISK_TIME_S = 60;
 
+type QuizState = "not_started" | "question" | "leaderboard" | "ended";
+
+export type JoinResult =
+    | { ok: true; id: string; rejoined: boolean }
+    | { ok: false; error: string };
 
 export class Quiz {
 
@@ -11,137 +17,144 @@ export class Quiz {
     private problems: Problem[];
     private activeProblem: number;
     private users: User[];
-    private currentState: "leaderboard" | "question" | "not_started" | "ended";
+    private currentState: QuizState;
+    private timer: ReturnType<typeof setTimeout> | null;
+    private riskEndsAt: number;
 
-
-    /* 
-    Constructor for the Quiz class.
-    Initializes the quiz with a room ID, sets the quiz state to not started,
-    initializes the problems array, sets the active problem index to 0,
-    initializes the users array, and sets the current state to "not_started".
-
-    @param {string} roomId - The unique identifier for the quiz room.
-    @returns {void}
-    
-    */
     constructor(roomId: string) {
         this.roomId = roomId;
         this.hasStarted = false;
-        this.problems = []
+        this.problems = [];
         this.activeProblem = 0;
         this.users = [];
         this.currentState = "not_started";
+        this.timer = null;
+        this.riskEndsAt = 0;
         console.log("room created");
-        setInterval(() => {
-            this.debug();
-        }, 10000)
     }
 
-    /*
-    Debug method to log the current state of the quiz.
-    It logs the room ID, problems, users, current state, and active problem index to the console.
-
-    @returns {void}
-    */
-
+    /** Log the current state of the quiz. Call it by hand when you need it. */
     debug() {
-        console.log("----debug---")
-        console.log(this.roomId)
-        console.log(JSON.stringify(this.problems))
-        console.log(this.users)
-        console.log(this.currentState)
+        console.log("----debug---");
+        console.log(this.roomId);
+        console.log(JSON.stringify(this.problems));
+        console.log(this.users);
+        console.log(this.currentState);
         console.log(this.activeProblem);
     }
 
-    /*
-    Adds a problem to the quiz.
-
-    @param {Problem} problem - The problem to add.
-
-    @returns {void}
-    */
-
     addProblem(problem: Problem) {
         this.problems.push(problem);
-        console.log(this.problems);
     }
 
-    /*
-    Starts the quiz by setting the hasStarted flag to true and setting the first problem as the active problem.
-    It emits the "problem" event to the room with the first problem.
-
-    @returns {void}
-    */
-
+    /** Starts the quiz at the first problem. Ignored if already started or there are no problems. */
     start() {
+        if (this.hasStarted || this.problems.length === 0) {
+            return;
+        }
         this.hasStarted = true;
-        this.setActiveProblem(this.problems[0]);
+        this.beginQuestion();
     }
 
-    /*
-    Sets the active problem for the quiz.
+    // ---------------------------------------------------------------
+    // Round and question flow
+    // ---------------------------------------------------------------
 
-    @param {Problem} problem - The problem to set as active.
-    @returns {void}
-    */
-
-    setActiveProblem(problem: Problem) {
-        console.log("set active problem")
-        this.currentState = "question"
-        problem.startTime = new Date().getTime();
-        problem.submissions = [];
-        IoManager.getIo().to(this.roomId).emit("problem", {
-            problem
-        })
-        // Todo: clear this if function moves ahead
-        setTimeout(() => {
-            this.sendLeaderboard();
-        }, PROBLEM_TIME_S * 1000);
-    }
-
-    /*
-
-    Sends the leaderboard to the room and updates the current state to "leaderboard".
-    @returns {void}
-
-    */
-
-
-    sendLeaderboard() {
-        console.log("send leaderboard")
-        this.currentState = "leaderboard"
-        const leaderboard = this.getLeaderboard();
-        IoManager.getIo().to(this.roomId).emit("leaderboard", {
-            leaderboard
-        })
-    }
-
-    /*
-    Moves to the next problem in the quiz.
-
-    @returns {void}
-    */
-
-    next() {
-        this.activeProblem++;
-        const problem = this.problems[this.activeProblem];
-        if (problem) {
-            this.setActiveProblem(problem);
-        } else {
-            this.activeProblem--;
-            // send final results here
-            // IoManager.getIo().emit("QUIZ_END", {
-            //     problem
-            // })
+    /** Every team goes back to 100. The round's result is added to the banked total first. */
+    private startNewRound() {
+        for (const user of this.users) {
+            user.banked += user.bankroll - CONFIG.START_BANKROLL;
+            user.bankroll = CONFIG.START_BANKROLL;
+            user.points = totalScore(user.banked, user.bankroll);
         }
     }
 
-    /*
-    Generates a random string of a specified length.
+    private beginQuestion() {
+        const problem = this.problems[this.activeProblem];
+        if (this.activeProblem % CONFIG.QUESTIONS_PER_ROUND === 0) {
+            this.startNewRound();
+        }
+        this.currentState = "question";
+        problem.startTime = Date.now();
+        problem.submissions = [];
+        this.riskEndsAt = problem.startTime + RISK_TIME_S * 1000;
 
-    @param {number} length - The length of the random string to generate.
-    @returns {string} - The generated random string.
-    */
+        IoManager.getIo().to(this.roomId).emit("problem", this.questionPayload());
+
+        this.clearTimer();
+        this.timer = setTimeout(() => this.closeRisks(), RISK_TIME_S * 1000);
+    }
+
+    private clearTimer() {
+        if (this.timer) {
+            clearTimeout(this.timer);
+            this.timer = null;
+        }
+    }
+
+    /** Stops the risk window, settles every team's risk and shows the results. Safe to call twice. */
+    closeRisks() {
+        if (this.currentState !== "question") {
+            return;
+        }
+        this.clearTimer();
+        this.settleActiveProblem();
+        this.sendLeaderboard();
+    }
+
+    private settleActiveProblem() {
+        const problem = this.problems[this.activeProblem];
+        if (!problem) {
+            return;
+        }
+        for (const user of this.users) {
+            const submission = problem.submissions.find(s => s.userId === user.id);
+            if (!submission) {
+                continue; // no risk placed: nothing gained, nothing lost
+            }
+            const result = settleQuestion(user.bankroll, submission.stakes, problem.answer);
+            submission.result = result;
+            user.bankroll = result.bankrollAfter;
+            if (result.gotCredit) {
+                user.correctCount++;
+            }
+            user.points = totalScore(user.banked, user.bankroll);
+        }
+    }
+
+    sendLeaderboard() {
+        this.currentState = "leaderboard";
+        IoManager.getIo().to(this.roomId).emit("leaderboard", this.revealPayload());
+    }
+
+    /**
+     * Admin "next" button.
+     * - During a question: ends the risk window and shows the results (does not skip them).
+     * - On the results screen: moves to the next question, or ends the quiz after the last one.
+     */
+    next() {
+        if (this.currentState === "question") {
+            this.closeRisks();
+            return;
+        }
+        if (this.currentState !== "leaderboard") {
+            return;
+        }
+        this.activeProblem++;
+        if (this.activeProblem < this.problems.length) {
+            this.beginQuestion();
+        } else {
+            this.activeProblem--;
+            this.currentState = "ended";
+            IoManager.getIo().to(this.roomId).emit("quizEnded", {
+                leaderboard: this.getLeaderboard()
+            });
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Teams and risks
+    // ---------------------------------------------------------------
 
     genRandonString(length: number) {
         var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$%^&*()';
@@ -153,102 +166,193 @@ export class Quiz {
         return result;
     }
 
-    /*
-    Adds a user to the quiz.
-
-    @param {string} name - The name of the user to add.
-    @returns {string} - The ID of the added user.
-    */
-
-    addUser(name: string) {
-        const id = this.genRandonString(7);
+    /**
+     * Join or rejoin a team.
+     * - A name already in this room (case-insensitive) is the SAME team: it keeps its points,
+     *   so rejoining can never reset a score or create a duplicate team.
+     * - New teams are capped at CONFIG.MAX_TEAMS, and (unless ALLOW_LATE_JOIN) can't be
+     *   created after the quiz has started.
+     */
+    joinTeam(name: string): JoinResult {
+        const key = name.toLowerCase();
+        const existing = this.users.find(u => u.name.toLowerCase() === key);
+        if (existing) {
+            return { ok: true, id: existing.id, rejoined: true };
+        }
+        if (this.hasStarted && !CONFIG.ALLOW_LATE_JOIN) {
+            return { ok: false, error: "The quiz has already started. Only existing teams can rejoin." };
+        }
+        if (this.users.length >= CONFIG.MAX_TEAMS) {
+            return { ok: false, error: `This room is full (${CONFIG.MAX_TEAMS} teams).` };
+        }
+        let id = this.genRandonString(7);
+        while (this.users.some(u => u.id === id)) {
+            id = this.genRandonString(7);
+        }
         this.users.push({
             id,
             name,
-            points: 0
-        })
-        return id;
-    }
-
-    /*
-    Submits a user's answer to a problem in the quiz.
-    @param {string} userId - The ID of the user submitting the answer.
-    @param {string} roomId - The ID of the room where the quiz is taking place.
-    @param {string} problemId - The ID of the problem being answered.
-    @param {AllowedSubmissions} submission - The user's submission.
-
-    @returns {void}
-    */
-
-    submit(userId: string, roomId: string, problemId: string, submission: AllowedSubmissions) {
-        console.log("userId");
-        console.log(userId);
-        const problem = this.problems.find(x => x.id == problemId);
-        const user = this.users.find(x => x.id === userId);
-
-        if (!problem || !user) {
-            console.log("problem or user not found")
-            return;
-        }
-        const existingSubmission = problem.submissions.find(x => x.userId === userId);
-
-        if (existingSubmission) {
-            console.log("existn submissions")
-            return;
-        }
-
-        problem.submissions.push({
-            problemId,
-            userId,
-            isCorrect: problem.answer === submission,
-            optionSelected: submission
+            bankroll: CONFIG.START_BANKROLL,
+            banked: 0,
+            points: 0,
+            correctCount: 0
         });
-        user.points += (1000 - (500 * (new Date().getTime() - problem.startTime) / (PROBLEM_TIME_S * 1000)));
+        return { ok: true, id, rejoined: false };
     }
 
-    /*
-    Gets the leaderboard of the quiz, sorted by user points in descending order.
+    /** Convenience wrapper: join (or rejoin) a team and return its id. Throws if the join is refused. */
+    addUser(name: string): string {
+        const joined = this.joinTeam(name);
+        if (!joined.ok) {
+            throw new Error(joined.error);
+        }
+        return joined.id;
+    }
 
-    @returns {Array} - The leaderboard of the quiz.
-    */
+    getTeamName(userId: string): string | null {
+        return this.users.find(u => u.id === userId)?.name ?? null;
+    }
 
+    /**
+     * A team places (or changes) its risk. The last risk before the window closes is the one that counts.
+     */
+    placeRisk(userId: string, problemId: string, stakes: Stakes): { ok: boolean; error?: string } {
+        if (this.currentState !== "question" || Date.now() > this.riskEndsAt) {
+            return { ok: false, error: "Risks are closed." };
+        }
+        const problem = this.problems[this.activeProblem];
+        if (!problem || problem.id !== problemId) {
+            return { ok: false, error: "That question is not active." };
+        }
+        const user = this.users.find(x => x.id === userId);
+        if (!user) {
+            return { ok: false, error: "Team not found." };
+        }
+        const error = validateRisk(stakes, user.bankroll);
+        if (error) {
+            return { ok: false, error };
+        }
+        const clean: Stakes = [stakes[0], stakes[1], stakes[2], stakes[3]];
+        const existing = problem.submissions.find(s => s.userId === userId);
+        if (existing) {
+            existing.stakes = clean;
+        } else {
+            problem.submissions.push({ problemId, userId, stakes: clean });
+        }
+        return { ok: true };
+    }
+
+    // ---------------------------------------------------------------
+    // What gets sent to clients
+    // ---------------------------------------------------------------
+
+    /** Top 20 by total score; correct answers break ties. Returns a copy, so users stay in order. */
     getLeaderboard() {
-        return this.users.sort((a, b) => a.points < b.points ? 1 : -1).slice(0, 20);;
+        return [...this.users]
+            .sort((a, b) => (b.points - a.points) || (b.correctCount - a.correctCount))
+            .slice(0, 20);
     }
 
-    /*
-    Gets the current state of the quiz.
+    /** Only whitelisted fields: no answer, no submissions. */
+    private toPublic(problem: Problem): PublicProblem {
+        return {
+            id: problem.id,
+            title: problem.title,
+            description: problem.description,
+            image: problem.image,
+            startTime: problem.startTime,
+            options: problem.options
+        };
+    }
 
-    @returns {Object} - The current state of the quiz.
-    */
+    private roundInfo() {
+        const n = CONFIG.QUESTIONS_PER_ROUND;
+        return {
+            round: Math.floor(this.activeProblem / n) + 1,
+            totalRounds: CONFIG.ROUNDS,
+            questionInRound: (this.activeProblem % n) + 1,
+            questionsPerRound: n,
+            totalQuestions: this.problems.length
+        };
+    }
 
-    getCurrentState() {
+    /** Every team's bankroll, plus the smallest and largest total it may risk right now. */
+    private teamsSnapshot() {
+        return this.users.map(u => {
+            const limits = riskLimits(u.bankroll);
+            return {
+                id: u.id,
+                name: u.name,
+                bankroll: u.bankroll,
+                points: u.points,
+                minRisk: limits.min,
+                maxRisk: limits.max
+            };
+        });
+    }
+
+    private questionPayload(includeAnswer = false) {
+        const problem = this.problems[this.activeProblem];
+        return {
+            problem: includeAnswer ? problem : this.toPublic(problem),
+            endsAt: this.riskEndsAt,
+            // Lets each device work out the time left without trusting its own clock.
+            serverNow: Date.now(),
+            rules: {
+                startBankroll: CONFIG.START_BANKROLL,
+                profitRate: CONFIG.PROFIT_RATE,
+                correctBonus: CONFIG.CORRECT_BONUS
+            },
+            ...this.roundInfo(),
+            teams: this.teamsSnapshot()
+        };
+    }
+
+    /** Sent once the risk window is closed, so it is safe to show everyone's risks and the answer. */
+    private revealPayload() {
+        const problem = this.problems[this.activeProblem];
+        const n = CONFIG.QUESTIONS_PER_ROUND;
+        return {
+            leaderboard: this.getLeaderboard(),
+            problem: this.toPublic(problem),
+            correctAnswer: problem.answer,
+            results: problem.submissions.map(s => ({
+                userId: s.userId,
+                stakes: s.stakes,
+                result: s.result
+            })),
+            ...this.roundInfo(),
+            isRoundEnd: (this.activeProblem + 1) % n === 0,
+            isFinal: this.activeProblem === this.problems.length - 1,
+            teams: this.teamsSnapshot()
+        };
+    }
+
+    /** includeAnswer is for the admin panel only. */
+    getCurrentState(includeAnswer = false) {
         if (this.currentState === "not_started") {
             return {
                 type: "not_started"
-            }
+            };
         }
         if (this.currentState === "ended") {
             return {
                 type: "ended",
                 leaderboard: this.getLeaderboard()
-            }
+            };
         }
         if (this.currentState === "leaderboard") {
             return {
                 type: "leaderboard",
-                leaderboard: this.getLeaderboard()
-            }
+                ...this.revealPayload()
+            };
         }
         if (this.currentState === "question") {
-            const problem = this.problems[this.activeProblem];
             return {
                 type: "question",
-                problem
-            }
+                ...this.questionPayload(includeAnswer)
+            };
         }
     }
-
-
 
 }

@@ -24,9 +24,9 @@ export const Home = () => {
         <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
             <Card className="w-full max-w-md">
                 <CardHeader className="text-center">
-                    <CardTitle className="text-2xl font-bold text-gray-800">Quiz App</CardTitle>
+                    <CardTitle className="text-2xl font-bold text-gray-800">High Stakes</CardTitle>
                     <CardDescription>
-                        Join an existing quiz or create a new one
+                        Join the competition with your team
                     </CardDescription>
                     <div className="flex items-center justify-center mt-2">
                         <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} />
@@ -44,10 +44,10 @@ export const Home = () => {
 
                         <TabsContent value="join" className="space-y-4">
                             <div className="space-y-2">
-                                <Label htmlFor="join-name">Your Name</Label>
+                                <Label htmlFor="join-name">Team Name</Label>
                                 <Input
                                     id="join-name"
-                                    placeholder="Enter your display name"
+                                    placeholder="Enter your team name"
                                     value={userName}
                                     onChange={(e: React.ChangeEvent<HTMLInputElement>) => setUserName(e.target.value)}
                                 />
@@ -56,10 +56,10 @@ export const Home = () => {
                                 <Label htmlFor="room-id">Room ID</Label>
                                 <Input
                                     id="room-id"
-                                    placeholder="Ask your instructor for the room ID"
+                                    placeholder="Ask your host for the room ID"
                                     value={roomId}
                                     onChange={(e: React.ChangeEvent<HTMLInputElement>) => setRoomId(e.target.value)}
-                                    onKeyPress={(e) => e.key === 'Enter' && userName.trim() && roomId.trim() && handleJoinRoom()}
+                                    onKeyDown={(e) => e.key === 'Enter' && userName.trim() && roomId.trim() && handleJoinRoom()}
                                 />
                             </div>
                             <Button
@@ -74,7 +74,7 @@ export const Home = () => {
                         <TabsContent value="create" className="space-y-4">
                             <div className="space-y-2 flex flex-col items-center p-10">
                                 <div className="text-center space-y-4">
-                                    <h3 className="font-semibold text-lg">Create Your Own Quiz</h3>
+                                    <h3 className="font-semibold text-lg">Host a Quiz</h3>
                                     <p className="text-gray-600 text-sm">
                                         To create and manage quizzes, switch to Admin Mode using the button in the top-right corner.
                                     </p>
@@ -82,7 +82,7 @@ export const Home = () => {
                                         <p className="text-blue-800 text-sm">
                                             <strong>Admin Features:</strong>
                                             <br />• Create quiz rooms
-                                            <br />• Add questions and answers
+                                            <br />• Add or upload questions and answers
                                             <br />• Control quiz flow
                                             <br />• Monitor live results
                                         </p>

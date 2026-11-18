@@ -55,7 +55,7 @@ function Navigation() {
 }
 
 function AppContent() {
-  const { userId, currentRoomId } = useSocket();
+  const { currentRoomId } = useSocket();
 
   return (
     <>
@@ -65,7 +65,9 @@ function AppContent() {
         <Route 
           path="/quiz/:roomId" 
           element={
-            userId && currentRoomId ? (
+            // Only wait for the room, not the user id: the id arrives from the server a moment
+            // after joining, and Quiz shows a "Connecting..." screen until then.
+            currentRoomId ? (
               <Quiz />
             ) : (
               <Navigate to="/" replace />
