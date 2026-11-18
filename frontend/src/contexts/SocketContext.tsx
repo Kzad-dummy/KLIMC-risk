@@ -41,7 +41,8 @@ export const SocketProvider = ({ children }: { children: React.ReactNode }) => {
 
   useEffect(() => {
     // Uses the address the page was opened from, so devices on the same Wi-Fi reach the host's server.
-    const newSocket = io(`http://${window.location.hostname}:3000`);
+    const SERVER_URL = import.meta.env.VITE_SERVER_URL ?? `http://${window.location.hostname}:3000`;
+    const newSocket = io(SERVER_URL);
     setSocket(newSocket);
 
     newSocket.on('connect', () => {
