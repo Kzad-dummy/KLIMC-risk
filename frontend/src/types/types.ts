@@ -1,26 +1,24 @@
 export type AllowedSubmissions = 0 | 1 | 2 | 3;
 
 // Points risked on each option, in order A, B, C, D. Example: [60, 0, 40, 0]
+// Any total from 0 to 100 is allowed; points not placed are simply lost.
 export type Stakes = [number, number, number, number];
 
 // What happened to one team on one question
 export interface Settlement {
-  bankrollBefore: number;
-  bankrollAfter: number;
-  totalStaked: number;
-  stakeOnCorrect: number;
-  bonus: number;
-  gotCredit: boolean;
+  totalStaked: number;       // points placed across all options
+  stakeOnCorrect: number;    // points placed on the correct option
+  score: number;             // what the team earned for this question (= stakeOnCorrect, 0 to 100)
+  pluralityCorrect: boolean; // correct option had strictly more points than any other (tie-break)
 }
 
 // A team, as it appears on the leaderboard
 export interface User {
   name: string;
   id: string;
-  points: number;       // total score
-  bankroll: number;     // current bankroll in this round
-  banked: number;
-  correctCount: number;
+  points: number;       // total score: sum of question scores
+  correctCount: number; // questions where the right option had the most points (tie-break)
+  rank?: number;        // tied teams share a rank (sent by the server on the leaderboard)
 }
 
 export interface Submission {
@@ -28,6 +26,7 @@ export interface Submission {
   userId: string;
   stakes: Stakes;
   result?: Settlement;
+  submitted?: boolean;  // false if the team never submitted (settled with empty stakes)
 }
 
 export interface Problem {
@@ -62,28 +61,25 @@ export interface PublicProblem {
 export interface TeamSnapshot {
   id: string;
   name: string;
-  bankroll: number;
   points: number;
-  minRisk: number;   // smallest total this team may risk right now
-  maxRisk: number;   // largest total this team may risk right now
+  correctCount: number;
 }
 
 export interface Rules {
-  startBankroll: number;
-  profitRate: number;    // 0.2 = a correct stake comes back with 20% extra
-  correctBonus: number;  // bonus x (stake on correct / total risked)
+  bankroll: number;  // points every team gets to spread on each question (100)
 }
 
-export interface RoundInfo {
-  round: number;
-  totalRounds: number;
-  questionInRound: number;
-  questionsPerRound: number;
+export interface ProgressInfo {
+  questionNumber: number;  // 1-based
   totalQuestions: number;
 }
 
+// Old name, kept as an alias so any other file importing it still compiles
+export type RoundInfo = ProgressInfo;
+
 export interface RiskOutcome {
   userId: string;
+  submitted: boolean;  // false = the team never submitted and scored 0
   stakes: Stakes;
   result?: Settlement;
 }
@@ -98,17 +94,16 @@ export type QuizView =
       serverNow: number;  // server time (ms) when this message was sent
       rules: Rules;
       teams: TeamSnapshot[];
-    } & RoundInfo)
+    } & ProgressInfo)
   | ({
       type: 'leaderboard';
       leaderboard: User[];
       problem: PublicProblem;
       correctAnswer: AllowedSubmissions;
       results: RiskOutcome[];
-      isRoundEnd: boolean;
       isFinal: boolean;
       teams: TeamSnapshot[];
-    } & RoundInfo)
+    } & ProgressInfo)
   | { type: 'ended'; leaderboard: User[] };
 
 export type QuestionView = Extract<QuizView, { type: 'question' }>;

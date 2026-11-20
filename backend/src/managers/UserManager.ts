@@ -26,7 +26,7 @@ export class UserManager {
             const name = String(data?.name ?? "").trim().slice(0, 30);
             const roomId = String(data?.roomId ?? "");
             if (!name) {
-                socket.emit("error", { message: "Please enter a team name." });
+                socket.emit("error", { message: "Please enter your TEAM NUMBER." });
                 return;
             }
 

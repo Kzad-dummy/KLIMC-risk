@@ -1,27 +1,24 @@
 // Option index: 0 = A, 1 = B, 2 = C, 3 = D (same as before)
 export type AllowedSubmissions = 0 | 1 | 2 | 3;
 
-// Points bet on each option, indexed 0-3. Example: [60, 0, 40, 0]
+// Points risked on each option, indexed 0-3. Example: [60, 0, 40, 0]
+// Any total from 0 to 100 is allowed; points not placed are simply lost.
 export type Stakes = [number, number, number, number];
 
 // What happened to one team on one question (filled in when the question is settled)
 export interface Settlement {
-    bankrollBefore: number; // bankroll before this question
-    bankrollAfter: number;   // new bankroll, rounded to a whole number
-    totalStaked: number;
-    stakeOnCorrect: number;
-    bonus: number;           // already included in bankrollAfter
-    gotCredit: boolean;      // true if any stake was on the correct option
+    totalStaked: number;       // total points placed across all options
+    stakeOnCorrect: number;    // points placed on the correct option
+    score: number;             // what the team earns for this question (= stakeOnCorrect, 0 to 100)
+    pluralityCorrect: boolean; // true if the correct option had strictly more points than any other (tie-break)
 }
 
 // A team. (Still called User so the rest of the code keeps working.)
 export interface User {
     name: string;
     id: string;
-    bankroll: number;        // current bankroll within the round (resets to 100 each round)
-    banked: number;          // sum of (ending bankroll - 100) over finished rounds
-    points: number;          // total score = banked + bankroll - 100 (what the leaderboard shows)
-    correctCount: number;    // questions where the team had any stake on the right option
+    points: number;          // total score: sum of question scores (what the leaderboard shows)
+    correctCount: number;    // questions where the right option had the most points (tie-break)
 }
 
 export interface Submission {
@@ -29,6 +26,7 @@ export interface Submission {
     userId: string;
     stakes: Stakes;
     result?: Settlement;     // set when the question is settled
+    submitted?: boolean;     // false if the team never submitted (settled with empty stakes)
 }
 
 export interface Problem {
@@ -45,5 +43,5 @@ export interface Problem {
     submissions: Submission[]
 }
 
-// What students are allowed to see: no answer, no one else's bets
+// What students are allowed to see: no answer, no one else's risks
 export type PublicProblem = Omit<Problem, "answer" | "submissions">;

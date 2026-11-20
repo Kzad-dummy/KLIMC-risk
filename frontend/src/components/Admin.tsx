@@ -13,24 +13,30 @@ import type { ProblemDraft } from '../lib/questionFile';
 import type { AllowedSubmissions, QuizView, User } from '../types/types';
 
 const letter = (index: number) => String.fromCharCode(65 + index);
-const signed = (n: number) => (n > 0 ? `+${n}` : `${n}`);
+
+// Keep in step with CONFIG.MAX_QUESTIONS in the backend's scoring.ts
+const MAX_QUESTIONS = 40;
 
 const LeaderboardList = ({ rows }: { rows: User[] }) => (
   <div className="space-y-2">
-    {rows.map((player, index) => (
-      <div key={player.id} className="flex items-center justify-between p-2 border rounded bg-white">
-        <div className="flex items-center">
-          <Badge variant={index < 3 ? 'default' : 'secondary'} className="mr-2">
-            #{index + 1}
-          </Badge>
-          <span className="font-medium">{player.name}</span>
-          <span className="ml-3 text-xs text-gray-500">
-            {player.correctCount} correct · bankroll {player.bankroll}
-          </span>
+    {rows.map((player, index) => {
+      // Teams level on score AND correct answers share a rank
+      const rank = player.rank ?? index + 1;
+      return (
+        <div key={player.id} className="flex items-center justify-between p-2 border rounded bg-white">
+          <div className="flex items-center">
+            <Badge variant={rank <= 3 ? 'default' : 'secondary'} className="mr-2">
+              #{rank}
+            </Badge>
+            <span className="font-medium">{player.name}</span>
+            <span className="ml-3 text-xs text-gray-500">
+              {player.correctCount} correct
+            </span>
+          </div>
+          <span className="font-bold">{player.points} pts</span>
         </div>
-        <span className="font-bold">{player.points} pts</span>
-      </div>
-    ))}
+      );
+    })}
   </div>
 );
 
@@ -186,8 +192,14 @@ export const Admin = () => {
     setFileName(file.name);
     try {
       const parsed = parseQuestionFile(await file.text());
-      setUploadErrors(parsed.errors);
-      setPendingProblems(parsed.errors.length === 0 ? parsed.problems : null);
+      const errors = [...parsed.errors];
+      if (errors.length === 0 && parsed.problems.length > MAX_QUESTIONS) {
+        errors.push(
+          `A quiz holds at most ${MAX_QUESTIONS} questions, and this file has ${parsed.problems.length}. Remove some and upload again.`
+        );
+      }
+      setUploadErrors(errors);
+      setPendingProblems(errors.length === 0 ? parsed.problems : null);
     } catch {
       setUploadErrors(['Could not read that file.']);
       setPendingProblems(null);
@@ -384,7 +396,8 @@ export const Admin = () => {
               </CardHeader>
               <CardContent className="space-y-3">
                 <p className="text-sm text-gray-600">
-                  A list of questions, each with exactly 4 options and an answer of A, B, C or D. Example:
+                  A list of questions, each with exactly 4 options and an answer of A, B, C or D.
+                  A quiz holds at most {MAX_QUESTIONS} questions. Example:
                 </p>
                 <pre className="rounded bg-gray-100 p-3 text-xs overflow-x-auto">{`[
   {
@@ -571,10 +584,9 @@ export const Admin = () => {
                       {(currentQuizState.type === 'question' || currentQuizState.type === 'leaderboard') && (
                         <>
                           <div className="flex justify-between">
-                            <span className="font-medium">Round / Question:</span>
+                            <span className="font-medium">Question:</span>
                             <span>
-                              {currentQuizState.round}/{currentQuizState.totalRounds} · {currentQuizState.questionInRound}/{currentQuizState.questionsPerRound}
-                              {' '}(overall {(currentQuizState.round - 1) * currentQuizState.questionsPerRound + currentQuizState.questionInRound} of {currentQuizState.totalQuestions})
+                              {currentQuizState.questionNumber} of {currentQuizState.totalQuestions}
                             </span>
                           </div>
                           <div className="flex justify-between">
@@ -655,7 +667,7 @@ export const Admin = () => {
                               <div key={team.id} className="flex justify-between text-sm bg-white border rounded px-2 py-1">
                                 <span>{team.name}</span>
                                 <span>
-                                  bankroll {team.bankroll} · {hasRisk ? '✓ risk placed' : 'waiting'}
+                                  {team.points} pts · {hasRisk ? '✓ risk placed' : 'waiting'}
                                 </span>
                               </div>
                             );
@@ -669,11 +681,6 @@ export const Admin = () => {
                         <h3 className="font-semibold text-lg">
                           Results · Correct answer: {letter(currentQuizState.correctAnswer)}. {currentQuizState.problem.options[currentQuizState.correctAnswer]?.title}
                         </h3>
-                        {currentQuizState.isRoundEnd && (
-                          <p className="text-sm font-medium text-blue-800">
-                            End of round {currentQuizState.round}. Bankrolls reset to 100 on the next question.
-                          </p>
-                        )}
                         <div className="space-y-1">
                           {currentQuizState.results.map(outcome => {
                             const team = currentQuizState.teams.find(t => t.id === outcome.userId);
@@ -681,13 +688,15 @@ export const Admin = () => {
                               <div key={outcome.userId} className="flex justify-between text-sm bg-white border rounded px-2 py-1">
                                 <span>{team?.name ?? outcome.userId}</span>
                                 <span>
-                                  {outcome.stakes.map((s, i) => `${letter(i)} ${s}`).join(' · ')}
-                                  {outcome.result && ` → ${outcome.result.bankrollAfter} (${signed(outcome.result.bankrollAfter - outcome.result.bankrollBefore)})`}
+                                  {outcome.submitted
+                                    ? outcome.stakes.map((s, i) => `${letter(i)} ${s}`).join(' · ')
+                                    : 'did not submit'}
+                                  {outcome.result && ` → +${outcome.result.score}`}
                                 </span>
                               </div>
                             );
                           })}
-                          {currentQuizState.results.length === 0 && (
+                          {currentQuizState.results.every(r => !r.submitted) && (
                             <p className="text-sm text-gray-600">No team placed a risk on this question.</p>
                           )}
                         </div>

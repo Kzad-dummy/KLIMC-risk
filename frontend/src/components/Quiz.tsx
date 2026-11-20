@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { Component, useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
@@ -10,7 +10,6 @@ import { useCountdown } from '../lib/useCountdown';
 import type { EndedView, QuestionView, ResultsView, Stakes, User } from '../types/types';
 
 const letter = (index: number) => String.fromCharCode(65 + index);
-const signed = (n: number) => (n > 0 ? `+${n}` : `${n}`);
 
 const Page = ({ children }: { children: React.ReactNode }) => (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
@@ -18,27 +17,31 @@ const Page = ({ children }: { children: React.ReactNode }) => (
     </div>
 );
 
-const LeaderboardTable = ({ rows, userId, showBankroll }: { rows: User[]; userId: string | null; showBankroll: boolean }) => (
+const LeaderboardTable = ({ rows, userId }: { rows: User[]; userId: string | null }) => (
     <div className="space-y-3">
-        {rows.map((user, index) => (
-            <div
-                key={user.id}
-                className={`flex justify-between items-center p-3 rounded-lg ${user.id === userId ? 'bg-blue-100 border-2 border-blue-300' : 'bg-gray-50'}`}
-            >
-                <div className="flex items-center space-x-3">
-                    <Badge variant={index < 3 ? "default" : "secondary"}>
-                        #{index + 1}
-                    </Badge>
-                    <div>
-                        <span className="font-medium">{user.name}</span>
-                        <div className="text-xs text-gray-500">
-                            {user.correctCount} correct{showBankroll ? ` · bankroll ${user.bankroll}` : ''}
+        {rows.map((user, index) => {
+            // Teams level on score AND correct answers share a rank (the server sends it)
+            const rank = user.rank ?? index + 1;
+            return (
+                <div
+                    key={user.id}
+                    className={`flex justify-between items-center p-3 rounded-lg ${user.id === userId ? 'bg-blue-100 border-2 border-blue-300' : 'bg-gray-50'}`}
+                >
+                    <div className="flex items-center space-x-3">
+                        <Badge variant={rank <= 3 ? "default" : "secondary"}>
+                            #{rank}
+                        </Badge>
+                        <div>
+                            <span className="font-medium">{user.name}</span>
+                            <div className="text-xs text-gray-500">
+                                {user.correctCount} correct
+                            </div>
                         </div>
                     </div>
+                    <span className="font-bold text-lg">{user.points}</span>
                 </div>
-                <span className="font-bold text-lg">{user.points}</span>
-            </div>
-        ))}
+            );
+        })}
     </div>
 );
 
@@ -74,28 +77,21 @@ const QuestionScreen = ({ state, roomId }: { state: QuestionView; roomId: string
         );
     }
 
-    const { bankroll, minRisk, maxRisk } = me;
-    const { rules } = state;
+    // Every question gives every team a fresh pool of points (100)
+    const bankroll = state.rules.bankroll;
     const closed = secondsLeft === 0;
 
     // Read the boxes: an empty box means 0
     const stakes = amounts.map(a => (a.trim() === '' ? 0 : Number(a)));
     const allValid = stakes.every(s => Number.isInteger(s) && s >= 0);
     const total = allValid ? stakes.reduce((sum, s) => sum + s, 0) : 0;
+    const left = bankroll - total;
     const touched = amounts.some(a => a.trim() !== '');
 
     let problem: string | null = null;
     if (!allValid) problem = 'Use whole numbers of 0 or more.';
-    else if (maxRisk <= 0) problem = 'You have no points left this round.';
-    else if (total < minRisk) problem = `Risk at least ${minRisk} points in total.`;
-    else if (total > maxRisk) problem = `Risk at most ${maxRisk} points in total.`;
-
-    // What the bankroll would be if each option turned out to be correct (same formula as the server)
-    const outcomeIfCorrect = (index: number): number | null => {
-        if (!allValid || total <= 0) return null;
-        const onCorrect = stakes[index];
-        return Math.round(bankroll - total + onCorrect * (1 + rules.profitRate) + rules.correctBonus * (onCorrect / total));
-    };
+    else if (total > bankroll) problem = `You've placed ${total} points. You only have ${bankroll}.`;
+    else if (total === 0) problem = 'Place at least 1 point.';
 
     const stakesTuple: Stakes = [stakes[0], stakes[1], stakes[2], stakes[3]];
     const changed = locked === null || locked.some((v, i) => v !== stakesTuple[i]);
@@ -105,8 +101,10 @@ const QuestionScreen = ({ state, roomId }: { state: QuestionView; roomId: string
     const setAmount = (index: number, value: string) => {
         setAmounts(prev => prev.map((a, i) => (i === index ? value : a)));
     };
-    const allInOn = (index: number) => {
-        setAmounts(['', '', '', ''].map((_, i) => (i === index ? String(maxRisk) : '')));
+    // "Max" puts every point you haven't placed elsewhere on this option
+    const putRestOn = (index: number) => {
+        const placedElsewhere = allValid ? total - stakes[index] : 0;
+        setAmount(index, String(Math.max(0, bankroll - placedElsewhere)));
     };
     const handleSend = () => {
         if (canSend) {
@@ -123,7 +121,7 @@ const QuestionScreen = ({ state, roomId }: { state: QuestionView; roomId: string
                     <CardHeader>
                         <div className="flex justify-between items-center">
                             <CardTitle>
-                                Round {state.round} of {state.totalRounds} · Question {state.questionInRound} of {state.questionsPerRound}
+                                Question {state.questionNumber} of {state.totalQuestions}
                             </CardTitle>
                             <Badge variant={secondsLeft > 10 ? "default" : "destructive"}>
                                 {secondsLeft}s
@@ -136,20 +134,20 @@ const QuestionScreen = ({ state, roomId }: { state: QuestionView; roomId: string
                 <div className="grid grid-cols-3 gap-3 text-center">
                     <Card>
                         <CardContent className="p-3">
-                            <div className="text-xs text-gray-500">Bankroll</div>
+                            <div className="text-xs text-gray-500">Points to place</div>
                             <div className="text-2xl font-bold">{bankroll}</div>
                         </CardContent>
                     </Card>
                     <Card>
                         <CardContent className="p-3">
-                            <div className="text-xs text-gray-500">Total risk allowed</div>
-                            <div className="text-2xl font-bold">{maxRisk > 0 ? `${minRisk}–${maxRisk}` : '—'}</div>
+                            <div className="text-xs text-gray-500">Placed</div>
+                            <div className="text-2xl font-bold">{total}</div>
                         </CardContent>
                     </Card>
                     <Card>
                         <CardContent className="p-3">
-                            <div className="text-xs text-gray-500">Your total risk</div>
-                            <div className="text-2xl font-bold">{total}</div>
+                            <div className="text-xs text-gray-500">Left</div>
+                            <div className={`text-2xl font-bold ${left < 0 ? 'text-red-600' : ''}`}>{left}</div>
                         </CardContent>
                     </Card>
                 </div>
@@ -160,50 +158,53 @@ const QuestionScreen = ({ state, roomId }: { state: QuestionView; roomId: string
                         <CardDescription>{state.problem.description}</CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-3">
-                        {state.problem.options.map((option, i) => {
-                            const after = outcomeIfCorrect(i);
-                            return (
-                                <div key={option.id} className="rounded-lg border bg-white p-3">
-                                    <div className="flex items-center gap-3">
-                                        <span className="font-bold w-6">{letter(i)}.</span>
-                                        <span className="flex-1">{option.title}</span>
-                                        <Input
-                                            type="number"
-                                            min={0}
-                                            step={1}
-                                            inputMode="numeric"
-                                            className="w-24 text-right"
-                                            placeholder="0"
-                                            value={amounts[i]}
-                                            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAmount(i, e.target.value)}
-                                            disabled={closed || maxRisk <= 0}
-                                        />
-                                        <Button
-                                            size="sm"
-                                            variant="outline"
-                                            onClick={() => allInOn(i)}
-                                            disabled={closed || maxRisk <= 0}
-                                        >
-                                            Max
-                                        </Button>
-                                    </div>
-                                    {after !== null && (
-                                        <div className="text-xs text-gray-500 mt-1 ml-9">
-                                            If {letter(i)} is correct: bankroll {bankroll} → {after} ({signed(after - bankroll)})
-                                        </div>
-                                    )}
+                        {state.problem.options.map((option, i) => (
+                            <div key={option.id} className="rounded-lg border bg-white p-3">
+                                <div className="flex items-center gap-3">
+                                    <span className="font-bold w-6">{letter(i)}.</span>
+                                    <span className="flex-1">{option.title}</span>
+                                    <Input
+                                        type="number"
+                                        min={0}
+                                        step={1}
+                                        inputMode="numeric"
+                                        className="w-24 text-right"
+                                        placeholder="0"
+                                        value={amounts[i]}
+                                        onChange={(e: React.ChangeEvent<HTMLInputElement>) => setAmount(i, e.target.value)}
+                                        disabled={closed}
+                                    />
+                                    <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={() => putRestOn(i)}
+                                        disabled={closed}
+                                        title="Put all your remaining points on this option"
+                                    >
+                                        Max
+                                    </Button>
                                 </div>
-                            );
-                        })}
+                                {allValid && stakes[i] > 0 && (
+                                    <div className="text-xs text-gray-500 mt-1 ml-9">
+                                        If {letter(i)} is correct, you score {stakes[i]}.
+                                    </div>
+                                )}
+                            </div>
+                        ))}
 
                         <div className="text-sm text-gray-600">
-                            Points you don't risk are kept: {allValid ? bankroll - total : bankroll}. Wrong stakes are lost; the correct stake
-                            comes back with {Math.round(rules.profitRate * 100)}% extra, plus up to {rules.correctBonus} bonus points
-                            for the share of your risk that was on the right answer.
+                            Place your {bankroll} points across the options. You score the points you placed on the
+                            correct answer. Points on wrong options, and any points you leave unplaced, score 0.
+                            Nothing is ever taken away.
                         </div>
 
                         {touched && problem && (
                             <p className="text-sm text-red-600">{problem}</p>
+                        )}
+                        {touched && !problem && left > 0 && (
+                            <p className="text-sm text-amber-700">
+                                You have {left} unplaced {left === 1 ? 'point' : 'points'}. They will score 0.
+                            </p>
                         )}
                         {serverError && (
                             <p className="text-sm text-red-600">{serverError}</p>
@@ -215,7 +216,7 @@ const QuestionScreen = ({ state, roomId }: { state: QuestionView; roomId: string
                         )}
                         {!locked && !closed && secondsLeft <= 15 && (
                             <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-yellow-800 text-center text-sm font-medium">
-                                ⚠ No risk placed yet. Press "Place risk" before time runs out.
+                                ⚠ No risk placed yet. Press "Place risk" before time runs out, or you score 0.
                             </div>
                         )}
                         {closed && (
@@ -247,6 +248,7 @@ const ResultsScreen = ({ state, userId }: { state: ResultsView; userId: string |
     const mine = state.results.find(r => r.userId === userId);
     const myTeam = state.teams.find(t => t.id === userId);
     const correctOption = state.problem.options[state.correctAnswer];
+    const myResult = mine && mine.submitted ? mine.result : undefined;
 
     return (
         <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4">
@@ -254,7 +256,7 @@ const ResultsScreen = ({ state, userId }: { state: ResultsView; userId: string |
                 <Card>
                     <CardHeader className="text-center">
                         <CardDescription>
-                            Round {state.round} of {state.totalRounds} · Question {state.questionInRound} of {state.questionsPerRound}
+                            Question {state.questionNumber} of {state.totalQuestions}
                         </CardDescription>
                         <CardTitle>{state.problem.title}</CardTitle>
                         <div className="mt-2 inline-block rounded-lg bg-green-50 border border-green-200 px-4 py-2 text-green-800 font-medium">
@@ -268,35 +270,39 @@ const ResultsScreen = ({ state, userId }: { state: ResultsView; userId: string |
                         <CardTitle className="text-lg">Your result</CardTitle>
                     </CardHeader>
                     <CardContent className="space-y-2 text-sm">
-                        {mine?.result ? (
+                        {mine && myResult ? (
                             <>
                                 <div>
-                                    Your risk: {mine.stakes.map((s, i) => `${letter(i)} ${s}`).join(' · ')} (total {mine.result.totalStaked})
+                                    Your risk: {mine.stakes.map((s, i) => `${letter(i)} ${s}`).join(' · ')} (total {myResult.totalStaked})
                                 </div>
                                 <div>
-                                    On the correct answer: {mine.result.stakeOnCorrect} · Bonus: +{mine.result.bonus.toFixed(1)}
+                                    On the correct answer: {myResult.stakeOnCorrect}
                                 </div>
                                 <div className="text-lg font-bold">
-                                    Bankroll: {mine.result.bankrollBefore} → {mine.result.bankrollAfter}{' '}
-                                    <span className={mine.result.bankrollAfter >= mine.result.bankrollBefore ? 'text-green-600' : 'text-red-600'}>
-                                        ({signed(mine.result.bankrollAfter - mine.result.bankrollBefore)})
+                                    Score this question:{' '}
+                                    <span className={myResult.score > 0 ? 'text-green-600' : 'text-gray-600'}>
+                                        {myResult.score}
                                     </span>
+                                </div>
+                                <div className="text-xs text-gray-500">
+                                    {myResult.pluralityCorrect
+                                        ? '✓ Counts as a correct answer for tie-breaks.'
+                                        : 'Not counted as correct for tie-breaks (the right answer needs more points than any other option).'}
                                 </div>
                             </>
                         ) : (
-                            <div>
-                                You didn't place a risk on this question, so your bankroll is unchanged
-                                {myTeam ? ` at ${myTeam.bankroll}` : ''}.
+                            <div className="text-lg font-bold text-gray-600">
+                                You didn't place a risk on this question, so you scored 0.
+                            </div>
+                        )}
+                        {myTeam && (
+                            <div className="pt-1 border-t">
+                                Your total: <span className="font-bold">{myTeam.points}</span>
                             </div>
                         )}
                     </CardContent>
                 </Card>
 
-                {state.isRoundEnd && !state.isFinal && (
-                    <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-center text-blue-800 font-medium">
-                        Round {state.round} complete! Every bankroll goes back to 100 for round {state.round + 1}.
-                    </div>
-                )}
                 {state.isFinal && (
                     <div className="rounded-lg border border-purple-200 bg-purple-50 p-3 text-center text-purple-800 font-medium">
                         That was the final question. Waiting for the host to show the final results…
@@ -306,10 +312,10 @@ const ResultsScreen = ({ state, userId }: { state: ResultsView; userId: string |
                 <Card>
                     <CardHeader className="text-center">
                         <CardTitle>Leaderboard</CardTitle>
-                        <CardDescription>Total score across all rounds</CardDescription>
+                        <CardDescription>Total score across all questions. Ties are broken by correct answers.</CardDescription>
                     </CardHeader>
                     <CardContent>
-                        <LeaderboardTable rows={state.leaderboard} userId={userId} showBankroll />
+                        <LeaderboardTable rows={state.leaderboard} userId={userId} />
                     </CardContent>
                 </Card>
             </div>
@@ -330,7 +336,7 @@ const EndedScreen = ({ state, userId }: { state: EndedView; userId: string | nul
                 </CardHeader>
                 <CardContent>
                     <h3 className="text-lg font-semibold text-center mb-4">Final Results</h3>
-                    <LeaderboardTable rows={state.leaderboard} userId={userId} showBankroll={false} />
+                    <LeaderboardTable rows={state.leaderboard} userId={userId} />
                 </CardContent>
             </Card>
         </Page>
@@ -338,10 +344,58 @@ const EndedScreen = ({ state, userId }: { state: EndedView; userId: string | nul
 };
 
 // ---------------------------------------------------------------------------
+// Safety net: if a screen ever crashes (e.g. unexpected data from the server),
+// show a message instead of a blank white page. It recovers by itself when the
+// next screen arrives.
+// ---------------------------------------------------------------------------
+
+class ScreenErrorBoundary extends Component<
+    { children: React.ReactNode; resetKey: string },
+    { failed: boolean }
+> {
+    state = { failed: false };
+
+    static getDerivedStateFromError() {
+        return { failed: true };
+    }
+
+    componentDidCatch(error: unknown) {
+        console.error('Quiz screen crashed:', error);
+    }
+
+    componentDidUpdate(prev: { resetKey: string }) {
+        if (this.state.failed && prev.resetKey !== this.props.resetKey) {
+            this.setState({ failed: false });
+        }
+    }
+
+    render() {
+        if (this.state.failed) {
+            return (
+                <Page>
+                    <Card className="w-full max-w-2xl">
+                        <CardHeader className="text-center">
+                            <CardTitle>Something went wrong showing this screen</CardTitle>
+                            <CardDescription>
+                                Your score is safe. Reload the page to carry on. If it keeps happening, tell the host.
+                            </CardDescription>
+                        </CardHeader>
+                        <CardContent className="text-center">
+                            <Button onClick={() => window.location.reload()}>Reload</Button>
+                        </CardContent>
+                    </Card>
+                </Page>
+            );
+        }
+        return this.props.children;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The page
 // ---------------------------------------------------------------------------
 
-export const Quiz = () => {
+const QuizScreens = () => {
     const { roomId } = useParams<{ roomId: string }>();
     const navigate = useNavigate();
     const { quizState, userId, joinError } = useSocket();
@@ -498,5 +552,17 @@ export const Quiz = () => {
                 </CardContent>
             </Card>
         </Page>
+    );
+};
+
+export const Quiz = () => {
+    const { quizState } = useSocket();
+    const resetKey = quizState
+        ? `${quizState.type}:${'problem' in quizState ? quizState.problem.id : ''}`
+        : 'none';
+    return (
+        <ScreenErrorBoundary resetKey={resetKey}>
+            <QuizScreens />
+        </ScreenErrorBoundary>
     );
 };

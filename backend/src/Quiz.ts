@@ -1,6 +1,6 @@
 import { IoManager } from "./managers/IoManager";
 import { Problem, PublicProblem, Stakes, User } from "./types/types";
-import { CONFIG, riskLimits, settleQuestion, totalScore, validateRisk } from "./scoring";
+import { CONFIG, Tally, addResult, compareTallies, emptyStakes, settleQuestion, validateRisk } from "./scoring";
 
 const RISK_TIME_S = 60;
 
@@ -43,8 +43,14 @@ export class Quiz {
         console.log(this.activeProblem);
     }
 
-    addProblem(problem: Problem) {
+    /** Adds a question. Returns false (and ignores it) once the cap of CONFIG.MAX_QUESTIONS is reached. */
+    addProblem(problem: Problem): boolean {
+        if (this.problems.length >= CONFIG.MAX_QUESTIONS) {
+            console.warn(`Question limit reached (${CONFIG.MAX_QUESTIONS}); extra question ignored.`);
+            return false;
+        }
         this.problems.push(problem);
+        return true;
     }
 
     /** Starts the quiz at the first problem. Ignored if already started or there are no problems. */
@@ -57,23 +63,11 @@ export class Quiz {
     }
 
     // ---------------------------------------------------------------
-    // Round and question flow
+    // Question flow
     // ---------------------------------------------------------------
-
-    /** Every team goes back to 100. The round's result is added to the banked total first. */
-    private startNewRound() {
-        for (const user of this.users) {
-            user.banked += user.bankroll - CONFIG.START_BANKROLL;
-            user.bankroll = CONFIG.START_BANKROLL;
-            user.points = totalScore(user.banked, user.bankroll);
-        }
-    }
 
     private beginQuestion() {
         const problem = this.problems[this.activeProblem];
-        if (this.activeProblem % CONFIG.QUESTIONS_PER_ROUND === 0) {
-            this.startNewRound();
-        }
         this.currentState = "question";
         problem.startTime = Date.now();
         problem.submissions = [];
@@ -102,23 +96,29 @@ export class Quiz {
         this.sendLeaderboard();
     }
 
+    /**
+     * Every team is scored on every question:
+     * score = points placed on the correct option (0 to 100). Wrong and unplaced points score 0.
+     * A team that never submitted gets 0 (it is settled with empty stakes).
+     */
     private settleActiveProblem() {
         const problem = this.problems[this.activeProblem];
         if (!problem) {
             return;
         }
         for (const user of this.users) {
-            const submission = problem.submissions.find(s => s.userId === user.id);
+            let submission = problem.submissions.find(s => s.userId === user.id);
             if (!submission) {
-                continue; // no risk placed: nothing gained, nothing lost
+                submission = { problemId: problem.id, userId: user.id, stakes: emptyStakes(), submitted: false };
+                problem.submissions.push(submission);
+            } else {
+                submission.submitted = true;
             }
-            const result = settleQuestion(user.bankroll, submission.stakes, problem.answer);
+            const result = settleQuestion(submission.stakes, problem.answer);
             submission.result = result;
-            user.bankroll = result.bankrollAfter;
-            if (result.gotCredit) {
-                user.correctCount++;
-            }
-            user.points = totalScore(user.banked, user.bankroll);
+            const tally = addResult({ total: user.points, correct: user.correctCount }, result);
+            user.points = tally.total;
+            user.correctCount = tally.correct;
         }
     }
 
@@ -192,8 +192,6 @@ export class Quiz {
         this.users.push({
             id,
             name,
-            bankroll: CONFIG.START_BANKROLL,
-            banked: 0,
             points: 0,
             correctCount: 0
         });
@@ -215,6 +213,7 @@ export class Quiz {
 
     /**
      * A team places (or changes) its risk. The last risk before the window closes is the one that counts.
+     * Any total from 0 to 100 is accepted; points not placed are simply lost.
      */
     placeRisk(userId: string, problemId: string, stakes: Stakes): { ok: boolean; error?: string } {
         if (this.currentState !== "question" || Date.now() > this.riskEndsAt) {
@@ -228,7 +227,7 @@ export class Quiz {
         if (!user) {
             return { ok: false, error: "Team not found." };
         }
-        const error = validateRisk(stakes, user.bankroll);
+        const error = validateRisk(stakes);
         if (error) {
             return { ok: false, error };
         }
@@ -246,10 +245,18 @@ export class Quiz {
     // What gets sent to clients
     // ---------------------------------------------------------------
 
-    /** Top 20 by total score; correct answers break ties. Returns a copy, so users stay in order. */
-    getLeaderboard() {
-        return [...this.users]
-            .sort((a, b) => (b.points - a.points) || (b.correctCount - a.correctCount))
+    /**
+     * Top 20 by total score; plurality-correct count breaks ties.
+     * Teams that are still tied after that share a rank. Returns copies, so users stay in order.
+     */
+    getLeaderboard(): (User & { rank: number })[] {
+        const tally = (u: User): Tally => ({ total: u.points, correct: u.correctCount });
+        const sorted = [...this.users].sort((a, b) => compareTallies(tally(a), tally(b)));
+        return sorted
+            .map(u => ({
+                ...u,
+                rank: 1 + sorted.filter(o => compareTallies(tally(o), tally(u)) < 0).length
+            }))
             .slice(0, 20);
     }
 
@@ -265,30 +272,21 @@ export class Quiz {
         };
     }
 
-    private roundInfo() {
-        const n = CONFIG.QUESTIONS_PER_ROUND;
+    private progressInfo() {
         return {
-            round: Math.floor(this.activeProblem / n) + 1,
-            totalRounds: CONFIG.ROUNDS,
-            questionInRound: (this.activeProblem % n) + 1,
-            questionsPerRound: n,
+            questionNumber: this.activeProblem + 1,
             totalQuestions: this.problems.length
         };
     }
 
-    /** Every team's bankroll, plus the smallest and largest total it may risk right now. */
+    /** Every team's running totals. */
     private teamsSnapshot() {
-        return this.users.map(u => {
-            const limits = riskLimits(u.bankroll);
-            return {
-                id: u.id,
-                name: u.name,
-                bankroll: u.bankroll,
-                points: u.points,
-                minRisk: limits.min,
-                maxRisk: limits.max
-            };
-        });
+        return this.users.map(u => ({
+            id: u.id,
+            name: u.name,
+            points: u.points,
+            correctCount: u.correctCount
+        }));
     }
 
     private questionPayload(includeAnswer = false) {
@@ -299,11 +297,9 @@ export class Quiz {
             // Lets each device work out the time left without trusting its own clock.
             serverNow: Date.now(),
             rules: {
-                startBankroll: CONFIG.START_BANKROLL,
-                profitRate: CONFIG.PROFIT_RATE,
-                correctBonus: CONFIG.CORRECT_BONUS
+                bankroll: CONFIG.BANKROLL
             },
-            ...this.roundInfo(),
+            ...this.progressInfo(),
             teams: this.teamsSnapshot()
         };
     }
@@ -311,18 +307,17 @@ export class Quiz {
     /** Sent once the risk window is closed, so it is safe to show everyone's risks and the answer. */
     private revealPayload() {
         const problem = this.problems[this.activeProblem];
-        const n = CONFIG.QUESTIONS_PER_ROUND;
         return {
             leaderboard: this.getLeaderboard(),
             problem: this.toPublic(problem),
             correctAnswer: problem.answer,
             results: problem.submissions.map(s => ({
                 userId: s.userId,
+                submitted: s.submitted !== false,
                 stakes: s.stakes,
                 result: s.result
             })),
-            ...this.roundInfo(),
-            isRoundEnd: (this.activeProblem + 1) % n === 0,
+            ...this.progressInfo(),
             isFinal: this.activeProblem === this.problems.length - 1,
             teams: this.teamsSnapshot()
         };

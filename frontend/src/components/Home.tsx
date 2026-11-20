@@ -44,10 +44,10 @@ export const Home = () => {
 
                         <TabsContent value="join" className="space-y-4">
                             <div className="space-y-2">
-                                <Label htmlFor="join-name">Team Name</Label>
+                                <Label htmlFor="join-name">Team Number</Label>
                                 <Input
                                     id="join-name"
-                                    placeholder="Enter your team name"
+                                    placeholder="Enter your TEAM NUMBER"
                                     value={userName}
                                     onChange={(e: React.ChangeEvent<HTMLInputElement>) => setUserName(e.target.value)}
                                 />
