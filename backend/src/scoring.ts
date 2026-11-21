@@ -15,7 +15,7 @@ import { AllowedSubmissions, Settlement, Stakes } from "./types/types";
 export const CONFIG = {
     BANKROLL: 100,            // fresh bankroll every question
     MAX_QUESTIONS: 40,        // hard cap on questions in one game
-    MAX_TEAMS: 30,            // fixed cap on teams per room (stops endless joins)
+    MAX_TEAMS: 35,            // fixed cap on teams per room (stops endless joins)
     ALLOW_LATE_JOIN: false,   // false = once the quiz starts, only existing teams can rejoin
 };
 

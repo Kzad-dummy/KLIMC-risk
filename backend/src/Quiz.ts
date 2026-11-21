@@ -257,7 +257,7 @@ export class Quiz {
                 ...u,
                 rank: 1 + sorted.filter(o => compareTallies(tally(o), tally(u)) < 0).length
             }))
-            .slice(0, 20);
+            .slice(0, 35);
     }
 
     /** Only whitelisted fields: no answer, no submissions. */
